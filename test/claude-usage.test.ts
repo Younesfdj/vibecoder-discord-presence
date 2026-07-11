@@ -77,10 +77,12 @@ test('presence collapses missing usage row cleanly', () => {
   assert.ok(!p.details!.includes('usage'), 'no usage litter in details');
 });
 
-test('chaos theme puts usage on its own row', () => {
-  const p = renderPresence(THEMES.chaos!, stateWithUsage(), NOW);
+test('chaos theme puts usage on its own row and keeps every-stat details', () => {
+  const p = renderPresence(THEMES.chaos!, stateWithUsage({ sessionCount: 3 }), NOW);
   assert.equal(p.state, 'usage: 5h 54% · wk 27%');
   assert.ok(p.details && !p.details.includes('5h'), 'usage not mixed into details');
+  assert.ok(p.details?.includes('main'), 'branch in details');
+  assert.ok(p.details?.includes('×3'), 'sessionCount in details');
 });
 
 test('usage percentages round to whole numbers in the usage row', () => {
@@ -211,6 +213,39 @@ test('readCredentials skips a malformed keychain entry and keeps looking', async
   }
 });
 
+test('readCredentials soft-fails a malformed plaintext file and tries keychain', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'vdp-creds-'));
+  try {
+    const now = 10_000;
+    await writeFile(join(dir, '.credentials.json'), '{ not valid json');
+    const creds = await readCredentials(dir, {
+      now,
+      readKeychain: async () => [oauth('live-keychain', 20_000)],
+    });
+    assert.equal(creds?.accessToken, 'live-keychain');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('readCredentials soft-fails a credentials file missing accessToken', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'vdp-creds-'));
+  try {
+    const now = 10_000;
+    await writeFile(
+      join(dir, '.credentials.json'),
+      JSON.stringify({ claudeAiOauth: { expiresAt: 20_000 } }),
+    );
+    const creds = await readCredentials(dir, {
+      now,
+      readKeychain: async () => [oauth('from-keychain', 20_000)],
+    });
+    assert.equal(creds?.accessToken, 'from-keychain');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 // ── parseUsage / pollUsage ─────────────────────────────────────────────────
 
 test('parseUsage maps available caps, skips null, trusts utilization verbatim', () => {
@@ -226,11 +261,12 @@ test('parseUsage skips non-finite utilization (NaN/Infinity)', () => {
 });
 
 test('pollUsage sends oauth headers and parses the body', async () => {
-  let seen: { url: string; headers: Record<string, string> } | null = null;
+  let seen: { url: string; headers: Record<string, string>; hasSignal: boolean } | null = null;
   const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
     seen = {
       url: String(url),
       headers: init?.headers as Record<string, string>,
+      hasSignal: init?.signal != null,
     };
     return new Response(JSON.stringify(liveBody), { status: 200 });
   }) as typeof fetch;
@@ -240,6 +276,7 @@ test('pollUsage sends oauth headers and parses the body', async () => {
   assert.equal(seen!.headers.Authorization, 'Bearer tok-123');
   assert.equal(seen!.headers['anthropic-beta'], 'oauth-2025-04-20');
   assert.equal(seen!.headers['User-Agent'], 'claude-code/9.9.9');
+  assert.equal(seen!.hasSignal, true, 'pollUsage must pass an AbortSignal timeout');
 });
 
 test('pollUsage throws UsageAuthError on 401', async () => {
@@ -317,6 +354,33 @@ test('fetchClaudeUsage never throws on network/auth failure', async () => {
       fetchImpl: (async () => new Response('', { status: 401 })) as typeof fetch,
     });
     assert.deepEqual(usage, {});
+  } finally {
+    clearClaudeUsageCache();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('fetchClaudeUsage keeps last good usage after a transient poll failure', async () => {
+  clearClaudeUsageCache();
+  const dir = await mkdtemp(join(tmpdir(), 'vdp-fetch-'));
+  try {
+    await writeFile(join(dir, '.credentials.json'), oauth('live-tok', 100_000));
+    const ok = await fetchClaudeUsage({
+      configDir: dir,
+      now: 10_000,
+      readKeychain: async () => [],
+      fetchImpl: (async () => new Response(JSON.stringify(liveBody), { status: 200 })) as typeof fetch,
+    });
+    assert.deepEqual(ok, { usage5h: 46, usageWeekly: 19 });
+
+    // After TTL, a 401 must not wipe the previous percentages.
+    const recovered = await fetchClaudeUsage({
+      configDir: dir,
+      now: 10_000 + 61_000,
+      readKeychain: async () => [],
+      fetchImpl: (async () => new Response('', { status: 401 })) as typeof fetch,
+    });
+    assert.deepEqual(recovered, { usage5h: 46, usageWeekly: 19 });
   } finally {
     clearClaudeUsageCache();
     await rm(dir, { recursive: true, force: true });

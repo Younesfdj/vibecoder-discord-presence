@@ -56,7 +56,7 @@ Seven built-ins, from privacy-safe to maximum vibes.
 | `developer` | Project, branch, model, plan usage (5h / weekly %)     |
 | `focus`     | Deep-work timer                                        |
 | `playful`   | Vibey and casual                                       |
-| `chaos`     | 🚀 Every stat (incl. plan usage), all the emojis       |
+| `chaos`     | 🚀 Every stat (activity, project, branch, model, tokens, cost, sessions, plan usage), all the emojis |
 | `terminal`  | `>` Retro hacker prompt — privacy-safe, never leaks your project |
 | `shipper`   | 🚢 Momentum & ship-it energy                           |
 

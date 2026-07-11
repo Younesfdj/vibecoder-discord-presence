@@ -115,15 +115,16 @@ export async function readCredentials(
   // sees "expired" rather than a bare "no credentials".
   let stale: Credentials | null = null;
 
-  // 1. plaintext file (Linux + universal fallback). A malformed-but-present file
-  //    is a real error we surface; only "not there" (ENOENT) falls through.
+  // 1. plaintext file (Linux + universal fallback). Missing *or* malformed files
+  //    are a soft miss — on darwin the keychain is often the live source while a
+  //    stale/corrupt plaintext file is just Claude Code's leftover fallback.
   try {
     const c = parseCredentials(await readFile(join(configDir, '.credentials.json'), 'utf8'));
     const fresh = useIfFresh(c);
     if (fresh) return fresh;
     stale ??= c;
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  } catch {
+    // ENOENT, bad JSON, missing accessToken, unreadable — try keychain next.
   }
 
   // 2. macOS keychain — source of truth on darwin. A live token here must win
@@ -196,26 +197,38 @@ export function parseUsage(body: unknown): ClaudeUsage {
   return usage;
 }
 
+/** Bound a hung usage request so the daemon tick cannot stall forever. */
+export const POLL_TIMEOUT_MS = 5_000;
+
 export interface PollOptions {
   version?: string;
   fetchImpl?: typeof fetch;
+  /** Override the default {@link POLL_TIMEOUT_MS} (ms). `0` disables the timeout. */
+  timeoutMs?: number;
 }
 
 /**
  * Read the account-wide tank. Caller must have verified `now < expiresAt` first.
  * 401 → {@link UsageAuthError}; other non-2xx → {@link UsageRequestError}.
+ * Abort/timeout also rejects (callers map that into fail-open / stale cache).
  */
 export async function pollUsage(
   accessToken: string,
   opts: PollOptions = {},
 ): Promise<ClaudeUsage> {
   const f = opts.fetchImpl ?? fetch;
+  const timeoutMs = opts.timeoutMs ?? POLL_TIMEOUT_MS;
+  const signal =
+    timeoutMs > 0 && typeof AbortSignal !== 'undefined' && 'timeout' in AbortSignal
+      ? AbortSignal.timeout(timeoutMs)
+      : undefined;
   const res = await f(USAGE_URL, {
     headers: {
       Authorization: `Bearer ${accessToken}`,
       'anthropic-beta': OAUTH_BETA,
       'User-Agent': `claude-code/${opts.version ?? '1.0.0'}`,
     },
+    ...(signal ? { signal } : {}),
   });
 
   if (res.status === 401) {
@@ -285,7 +298,14 @@ export async function fetchClaudeUsage(
     cache = { fetchedAt: now, usage };
     return usage;
   } catch {
-    // Auth, network, malformed credentials — presence continues without %.
+    // Auth, network, timeout, malformed credentials — fail open. Prefer the last
+    // successful usage (stale-while-error) so a single blip does not blank the
+    // presence card for a full CACHE_TTL. Advance fetchedAt so we do not hammer
+    // the API every tick while the outage lasts.
+    if (cache && (cache.usage.usage5h != null || cache.usage.usageWeekly != null)) {
+      cache = { fetchedAt: now, usage: cache.usage };
+      return cache.usage;
+    }
     cache = { fetchedAt: now, usage: {} };
     return {};
   }

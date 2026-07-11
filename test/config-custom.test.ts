@@ -107,6 +107,26 @@ test('custom template "usage: {usage5h} · {usageWeekly}" collapses when empty',
   assert.equal(p.details, 'Coding');
 });
 
+test('custom template "usage: {usage5h} · {usageWeekly}" cleans partial windows', () => {
+  const theme: Theme = {
+    ...EMPTY_THEME,
+    details: 'Coding',
+    state: 'usage: {usage5h} · {usageWeekly}',
+  };
+  const onlyWk = renderPresence(
+    theme,
+    { sessionCount: 1, startedAt: NOW - 1000, usageWeekly: 27 },
+    NOW,
+  );
+  assert.equal(onlyWk.state, 'usage: wk 27%');
+  const only5h = renderPresence(
+    theme,
+    { sessionCount: 1, startedAt: NOW - 1000, usage5h: 54 },
+    NOW,
+  );
+  assert.equal(only5h.state, 'usage: 5h 54%');
+});
+
 test('compact status falls back when usage state row is empty', () => {
   const theme: Theme = {
     ...EMPTY_THEME,
@@ -143,6 +163,9 @@ test('placeholder catalog matches render keys used in a full template', () => {
   }
   assert.ok(placeholderTipLine().includes('{usage}'));
   assert.ok(usagePlaceholderHint().includes('{usage}'));
+  // Tokens already include "5h"/"wk" labels — tip must not suggest double-labeling.
+  assert.ok(!usagePlaceholderHint().includes('5h {usage5h}'));
+  assert.ok(usagePlaceholderHint().includes('{usage5h} · {usageWeekly}'));
 });
 
 test('readUserConfig + resolveTheme round-trips a custom usage theme from disk', async () => {

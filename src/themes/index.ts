@@ -68,7 +68,8 @@ export const THEMES: Record<string, Theme> = {
   },
 
   chaos: {
-    details: '🚀 {activity} — 📂 {project} · {model} · {tokens} · {cost} · ⌛ {elapsed}',
+    details:
+      '🚀 {activity} — 📂 {project} ({branch}) · {model} · {tokens} · {cost} · ⌛ {elapsed} · ×{sessionCount}',
     state: '{usage}',
     largeImage: { key: 'logo', text: '✨ locked in · {model} · no thoughts only vibes 🔥' },
     smallImage: { key: 'status-{state}', text: '{activity} fr fr 💯' },

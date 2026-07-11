@@ -53,6 +53,6 @@ export function placeholderTipLine(): string {
 export function usagePlaceholderHint(): string {
   return (
     'Plan usage: put {usage} alone on a line for "usage: 5h … · wk …". ' +
-    'Or compose with {usage5h} / {usageWeekly} (e.g. "5h {usage5h}").'
+    'Or compose with {usage5h} / {usageWeekly} (e.g. "{usage5h} · {usageWeekly}").'
   );
 }

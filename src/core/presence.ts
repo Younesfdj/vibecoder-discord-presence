@@ -81,7 +81,9 @@ function tidy(s: string): string {
     .replace(/·(\s*·)+/g, '·') // "· ·" -> "·"
     .replace(/^\s*·\s*/, '') // leading separator
     .replace(/\s*·\s*$/, '') // trailing separator
-    .replace(/^usage:\s*$/i, '') // custom "usage: {usage5h}…" with nothing filled
+    // custom "usage: {usage5h} · {usageWeekly}" with only one window → "usage: · wk …"
+    .replace(/^usage:\s*·\s*/i, 'usage: ')
+    .replace(/^usage:\s*$/i, '') // bare "usage:" when nothing filled
     .trim();
 }
 
