@@ -25,8 +25,13 @@ test('findUnknownAssetKeys flags an unknown key', () => {
 });
 
 test('status-{state} expands to the full activity-state family and all are valid', () => {
-  // minimal uses `status-{state}`; it must validate, proving the family is allowed.
+  // terminal uses `status-{state}`; it must validate, proving the family is allowed.
+  assert.equal(validateThemeAssets(THEMES.terminal!), true);
+});
+
+test('empty image keys are allowed (no badge / no large image)', () => {
   assert.equal(validateThemeAssets(THEMES.minimal!), true);
+  assert.equal(validateThemeAssets(THEMES.developer!), true);
 });
 
 // Registry / picker parity: the manifest is the single source of truth. Assert

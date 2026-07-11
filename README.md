@@ -53,12 +53,20 @@ Seven built-ins, from privacy-safe to maximum vibes.
 | Theme       | Vibe                                                  |
 | ----------- | ----------------------------------------------------- |
 | `minimal`   | Privacy-safe — nothing about your work (default)       |
-| `developer` | Project, branch, file, model                          |
+| `developer` | Project, branch, model, plan usage (5h / weekly %)     |
 | `focus`     | Deep-work timer                                        |
 | `playful`   | Vibey and casual                                       |
-| `chaos`     | 🚀 Every stat, all the emojis, peak vibes              |
+| `chaos`     | 🚀 Every stat (activity, project, branch, model, tokens, cost, sessions, plan usage), all the emojis |
 | `terminal`  | `>` Retro hacker prompt — privacy-safe, never leaks your project |
 | `shipper`   | 🚢 Momentum & ship-it energy                           |
+
+Plan usage comes from Anthropic’s OAuth usage API using the Claude Code session
+token already on your machine (Keychain / credentials file). No extra setup.
+Themes that show it put a dedicated row: `usage: 5h 54% · wk 27%` (`{usage}`).
+
+In `vdp config` → custom (or “customize” a built-in), you can use `{usage}`,
+`{usage5h}`, and `{usageWeekly}` in any text slot — the live preview fills them
+from sample data so you can design the card before saving.
 
 ## Customize
 

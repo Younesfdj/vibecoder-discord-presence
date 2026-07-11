@@ -56,11 +56,32 @@ export function readUserConfig(configPath: string): UserConfig {
   }
 }
 
-/** Resolve the effective theme (base theme + overrides) from a parsed config. */
+/**
+ * Resolve the effective theme (base theme + overrides) from a parsed config.
+ *
+ * Built-in themes use `THEMES[name]` as the base. The `custom` theme has no
+ * base entry — overrides are the full theme the editor saved — so we start from
+ * a neutral empty shell (not `minimal`) to avoid leaking privacy-safe defaults
+ * into slots the user intentionally left blank.
+ */
 export function resolveTheme(config: UserConfig): Theme {
+  if (config.theme === 'custom') {
+    return { ...EMPTY_THEME, ...(config.overrides ?? {}) } as Theme;
+  }
   const base = THEMES[config.theme] ?? THEMES[DEFAULT_THEME];
   return { ...base, ...(config.overrides ?? {}) } as Theme;
 }
+
+/** Neutral shell used when loading a saved custom theme (all slots empty). */
+export const EMPTY_THEME: Theme = {
+  details: '',
+  state: '',
+  largeImage: { key: '', text: '' },
+  smallImage: { key: '', text: '' },
+  timer: false,
+  buttons: [],
+  statusDisplay: 'name',
+};
 
 /** Resolve which Discord application id to publish under (env > config > default). */
 export function resolveClientId(config: UserConfig): string {
