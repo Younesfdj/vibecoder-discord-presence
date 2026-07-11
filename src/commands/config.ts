@@ -16,6 +16,7 @@
 import { Separator, confirm, input, select } from '@inquirer/prompts';
 import { configPath } from '../core/paths';
 import { DEFAULT_CONFIG, readUserConfig, resolveTheme, saveUserConfig } from '../core/config';
+import { placeholderTipLine, usagePlaceholderHint } from '../core/placeholders';
 import { renderPresence } from '../core/presence';
 import { THEMES, THEME_MANIFEST } from '../themes/index';
 import { isProcessAlive, readLock } from '../core/daemon-state';
@@ -24,8 +25,11 @@ import type { AggregatedState, PresenceButton, StatusDisplay, Theme, UserConfig 
 
 const APP_NAME = 'ClaudeCode'; // the registered Discord application name (the bold headline)
 
-/** Sample state used to render the preview so users see realistic text. */
-function sampleState(now: number): AggregatedState {
+/**
+ * Sample state for the live ASCII preview — includes every placeholder so a
+ * custom theme that uses `{usage}`, `{tokens}`, etc. previews realistically.
+ */
+export function sampleState(now: number): AggregatedState {
   return {
     sessionCount: 1,
     startedAt: now - 83_000, // ~1m 23s ago
@@ -99,7 +103,14 @@ function editInput(message: string, current: string): Promise<string> {
   return input({ message, default: current, prefill: 'editable' });
 }
 
-/** Sub-editor for the (up to two) buttons. */
+/** Prompt for a template slot, reminding the user about placeholders. */
+async function editTemplate(slotLabel: string, current: string): Promise<string> {
+  console.log(ui.dim(`  placeholders: ${placeholderTipLine()}`));
+  console.log(ui.dim(`  ${usagePlaceholderHint()}`));
+  return editInput(`${slotLabel}:`, current);
+}
+
+/** Sub-editor for the (up to two) buttons. Labels accept the same placeholders. */
 async function editButtons(currentButtons: PresenceButton[]): Promise<PresenceButton[]> {
   const buttons: PresenceButton[] = [];
   let addMore = await confirm({
@@ -108,6 +119,7 @@ async function editButtons(currentButtons: PresenceButton[]): Promise<PresenceBu
   });
   while (addMore && buttons.length < 2) {
     const i = buttons.length;
+    console.log(ui.dim(`  label placeholders: ${placeholderTipLine()}`));
     const label = await editInput(`Button ${i + 1} label:`, currentButtons[i]?.label ?? '');
     const url = await input({
       message: `Button ${i + 1} URL:`,
@@ -157,10 +169,13 @@ async function editThemeMenu(start: Theme): Promise<Theme | null> {
       case '__cancel':
         return null;
       case 'details':
-        t.details = await editInput('Details (top line):', t.details);
+        t.details = await editTemplate('Details (top line)', t.details);
         break;
       case 'state':
-        t.state = await editInput('State (second line):', t.state);
+        t.state = await editTemplate(
+          'State (second line — e.g. {usage} for a dedicated usage row)',
+          t.state,
+        );
         break;
       case 'timer':
         t.timer = await confirm({ message: 'Show the elapsed timer?', default: t.timer });
@@ -168,13 +183,13 @@ async function editThemeMenu(start: Theme): Promise<Theme | null> {
       case 'large':
         t.largeImage = {
           key: await editInput('Large image asset key:', t.largeImage.key),
-          text: await editInput('Large image tooltip:', t.largeImage.text),
+          text: await editTemplate('Large image tooltip', t.largeImage.text),
         };
         break;
       case 'small':
         t.smallImage = {
           key: await editInput('Small badge asset key:', t.smallImage.key),
-          text: await editInput('Small badge tooltip:', t.smallImage.text),
+          text: await editTemplate('Small badge tooltip', t.smallImage.text),
         };
         break;
       case 'status':
@@ -184,8 +199,8 @@ async function editThemeMenu(start: Theme): Promise<Theme | null> {
           loop: false,
           choices: [
             { name: 'App name ("Playing ClaudeCode")', value: 'name' },
-            { name: 'The state line (your activity)', value: 'state' },
-            { name: 'The details line', value: 'details' },
+            { name: 'The state line (second line — activity or usage)', value: 'state' },
+            { name: 'The details line (top line)', value: 'details' },
           ],
         })) as StatusDisplay;
         break;
@@ -224,11 +239,8 @@ export async function config(args: string[] = []): Promise<void> {
     console.log(
       `\n${ui.title('Customize your Discord presence')} ${ui.dim('— Ctrl+C to cancel')}\n`,
     );
-    console.log(
-      ui.dim(
-        'Tip: text fields accept placeholders like {project} {branch} {model} {file} {activity} {elapsed}.\n',
-      ),
-    );
+    console.log(ui.dim(`Tip: text fields accept placeholders: ${placeholderTipLine()}`));
+    console.log(ui.dim(`${usagePlaceholderHint()}\n`));
 
     // Built-in choices are derived from the theme manifest (single source of
     // truth); `custom` is appended as the always-available escape hatch.
@@ -253,12 +265,15 @@ export async function config(args: string[] = []): Promise<void> {
 
     let next: UserConfig;
     if (theme === 'custom') {
-      // Seed the editor from the saved custom theme so re-editing loads it.
-      const edited = await editThemeMenu(resolveTheme(current));
+      // Seed from the saved custom theme (or current built-in + overrides) so
+      // re-editing loads existing templates — including {usage} rows.
+      const seed = resolveTheme(current);
+      const edited = await editThemeMenu(seed);
       if (!edited) {
         console.log(ui.warn('Cancelled — no changes saved.'));
         return;
       }
+      // Persist the full theme under overrides (custom has no THEMES base entry).
       next = { theme: 'custom', overrides: edited, clientId: current.clientId };
     } else {
       console.log(`\n${previewCard(THEMES[theme]!)}\n`);

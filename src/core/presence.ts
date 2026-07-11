@@ -29,6 +29,9 @@ function formatTokens(n: number): string {
 /**
  * Format plan utilization for presence text. Labels live in the value so empty
  * placeholders collapse cleanly (no dangling "5h · wk" when usage is unknown).
+ *
+ * `{usage}` is the full second-row line ("usage: 5h 54% · wk 27%") and is empty
+ * when neither window is known — so a theme can put it on its own row safely.
  */
 function formatUsage5h(n: number): string {
   return `5h ${Math.round(n)}%`;
@@ -36,6 +39,13 @@ function formatUsage5h(n: number): string {
 
 function formatUsageWeekly(n: number): string {
   return `wk ${Math.round(n)}%`;
+}
+
+function formatUsageLine(usage5h?: number, usageWeekly?: number): string {
+  const parts: string[] = [];
+  if (usage5h != null) parts.push(formatUsage5h(usage5h));
+  if (usageWeekly != null) parts.push(formatUsageWeekly(usageWeekly));
+  return parts.length > 0 ? `usage: ${parts.join(' · ')}` : '';
 }
 
 function buildValues(state: AggregatedState, now: number): Values {
@@ -54,12 +64,14 @@ function buildValues(state: AggregatedState, now: number): Values {
     // Claude plan quota windows (from the OAuth usage API).
     usage5h: state.usage5h != null ? formatUsage5h(state.usage5h) : '',
     usageWeekly: state.usageWeekly != null ? formatUsageWeekly(state.usageWeekly) : '',
+    usage: formatUsageLine(state.usage5h, state.usageWeekly),
   };
 }
 
 /**
  * Tidy a template after substitution so collapsed placeholders don't leave
- * litter: empty `()`, doubled or dangling `·` separators, and runs of spaces.
+ * litter: empty `()`, doubled or dangling `·` separators, runs of spaces, and
+ * a bare `usage:` label left when a custom template wraps empty usage tokens.
  */
 function tidy(s: string): string {
   return s
@@ -69,6 +81,7 @@ function tidy(s: string): string {
     .replace(/·(\s*·)+/g, '·') // "· ·" -> "·"
     .replace(/^\s*·\s*/, '') // leading separator
     .replace(/\s*·\s*$/, '') // trailing separator
+    .replace(/^usage:\s*$/i, '') // custom "usage: {usage5h}…" with nothing filled
     .trim();
 }
 

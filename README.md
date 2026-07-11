@@ -60,9 +60,13 @@ Seven built-ins, from privacy-safe to maximum vibes.
 | `terminal`  | `>` Retro hacker prompt — privacy-safe, never leaks your project |
 | `shipper`   | 🚢 Momentum & ship-it energy                           |
 
-Plan usage (`{usage5h}`, `{usageWeekly}`) comes from Anthropic’s OAuth usage API
-using the Claude Code session token already on your machine (Keychain / credentials
-file). No extra setup.
+Plan usage comes from Anthropic’s OAuth usage API using the Claude Code session
+token already on your machine (Keychain / credentials file). No extra setup.
+Themes that show it put a dedicated row: `usage: 5h 54% · wk 27%` (`{usage}`).
+
+In `vdp config` → custom (or “customize” a built-in), you can use `{usage}`,
+`{usage5h}`, and `{usageWeekly}` in any text slot — the live preview fills them
+from sample data so you can design the card before saving.
 
 ## Customize
 

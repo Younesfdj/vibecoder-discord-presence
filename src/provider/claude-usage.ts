@@ -1,50 +1,234 @@
 /**
- * Claude subscription usage (5-hour + weekly windows).
+ * Claude plan usage (5-hour + weekly windows).
  *
- * Reads the on-device Claude Code OAuth session token and calls Anthropic's
- * OAuth usage endpoint — the same source that powers Claude Code's /usage
- * view. Used by the daemon to enrich presence with plan quota percentages.
+ * Mirrors how ccshare reads the on-device Claude Code OAuth session and polls
+ * Anthropic's OAuth usage endpoint:
+ *   - Never mint or refresh a token — only read what Claude Code stored.
+ *   - Skip the poll when the token is missing/expired (Claude Code refreshes
+ *     on its next run).
+ *   - Trust the endpoint's utilization % verbatim; never estimate from tokens.
  *
- * Credential sources (first match wins):
- *   1. CLAUDE_CODE_OAUTH_TOKEN env
- *   2. macOS Keychain service "Claude Code-credentials"
- *   3. ~/.claude/.credentials.json (or $CLAUDE_CONFIG_DIR)
+ * Credential sources (freshest-wins — see {@link readCredentials}):
+ *   1. `<configDir>/.credentials.json` if still live
+ *   2. macOS Keychain (`Claude Code-credentials` / hashed variant)
+ *   3. First readable-but-expired source as a last resort (so callers can
+ *      report "expired" rather than "none")
  *
- * Never throws — a missing token or network blip just yields empty usage so
- * the presence card keeps working without the percentages.
+ * The daemon wraps this so a missing token or network blip just omits the
+ * percentages from the presence card.
  */
-import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { claudeDir } from '../core/paths';
 
+const pExecFile = promisify(execFile);
+
+// ── Credentials (ccshare identity/credentials.ts) ──────────────────────────
+
+/** The OAuth token Claude Code already stored. We read it; we never mint one. */
+export interface Credentials {
+  accessToken: string;
+  expiresAt: number; // epoch ms
+  refreshToken?: string;
+  subscriptionType: string | null;
+  rateLimitTier: string | null;
+}
+
+/** Always verify before using the token. Treats missing/NaN expiry as expired. */
+export function isTokenExpired(
+  c: Pick<Credentials, 'expiresAt'>,
+  now: number = Date.now(),
+): boolean {
+  return !Number.isFinite(c.expiresAt) || now >= c.expiresAt;
+}
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+function parseCredentials(raw: string): Credentials {
+  const j = JSON.parse(raw) as any;
+  const o = j?.claudeAiOauth ?? j;
+  if (!o || typeof o.accessToken !== 'string' || o.accessToken.length === 0) {
+    throw new Error('credentials JSON missing claudeAiOauth.accessToken');
+  }
+  return {
+    accessToken: o.accessToken,
+    expiresAt: Number(o.expiresAt),
+    refreshToken: typeof o.refreshToken === 'string' ? o.refreshToken : undefined,
+    subscriptionType: o.subscriptionType ?? null,
+    rateLimitTier: o.rateLimitTier ?? null,
+  };
+}
+/* eslint-enable @typescript-eslint/no-explicit-any */
+
+/** macOS keychain service names to try, plain first then the hashed variant. */
+function keychainServices(configDir: string): string[] {
+  const hash = createHash('sha256').update(configDir).digest('hex').slice(0, 8);
+  return ['Claude Code-credentials', `Claude Code-credentials-${hash}`];
+}
+
+/** Reads each macOS keychain service, returning the raw JSON blobs it finds. */
+async function readKeychainDefault(services: string[]): Promise<string[]> {
+  if (process.platform !== 'darwin') return [];
+  const blobs: string[] = [];
+  for (const svc of services) {
+    try {
+      const { stdout } = await pExecFile('security', ['find-generic-password', '-s', svc, '-w']);
+      blobs.push(stdout);
+    } catch {
+      // service not present — try the next name
+    }
+  }
+  return blobs;
+}
+
+export interface ReadCredentialsOptions {
+  /** Epoch ms used to judge freshness. Defaults to `Date.now()`. */
+  now?: number;
+  /** Overrides the macOS keychain read (raw JSON blobs). A testing seam. */
+  readKeychain?: (services: string[]) => Promise<string[]>;
+}
+
+/**
+ * Read the stored credentials for an account's config dir, or null if none.
+ *
+ * Every source is only a *cache* of the OAuth token Claude Code minted, and any
+ * of them can go stale: on macOS the plaintext file is Claude Code's fallback
+ * when the keychain is briefly locked, and it is never deleted once the keychain
+ * recovers — so it can linger with a long-expired token while the keychain holds
+ * the live one. Never let an expired source shadow a live one: return the first
+ * *fresh* token found, and only fall back to an expired source when nothing
+ * fresher exists anywhere.
+ */
+export async function readCredentials(
+  configDir: string,
+  opts: ReadCredentialsOptions = {},
+): Promise<Credentials | null> {
+  const now = opts.now ?? Date.now();
+  const readKeychain = opts.readKeychain ?? readKeychainDefault;
+
+  const useIfFresh = (c: Credentials): Credentials | null =>
+    isTokenExpired(c, now) ? null : c;
+
+  // First readable-but-expired source, kept as a last resort so a caller still
+  // sees "expired" rather than a bare "no credentials".
+  let stale: Credentials | null = null;
+
+  // 1. plaintext file (Linux + universal fallback). A malformed-but-present file
+  //    is a real error we surface; only "not there" (ENOENT) falls through.
+  try {
+    const c = parseCredentials(await readFile(join(configDir, '.credentials.json'), 'utf8'));
+    const fresh = useIfFresh(c);
+    if (fresh) return fresh;
+    stale ??= c;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+
+  // 2. macOS keychain — source of truth on darwin. A live token here must win
+  //    over a stale file above, so we always consult it when the file wasn't fresh.
+  const blobs = await readKeychain(keychainServices(configDir));
+  for (const blob of blobs) {
+    let c: Credentials;
+    try {
+      c = parseCredentials(blob);
+    } catch {
+      continue; // malformed keychain entry — try the next
+    }
+    const fresh = useIfFresh(c);
+    if (fresh) return fresh;
+    stale ??= c;
+  }
+
+  return stale;
+}
+
+// ── Usage poll (ccshare usage/poller.ts) ───────────────────────────────────
+
+export const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
+export const OAUTH_BETA = 'oauth-2025-04-20';
+
 export interface ClaudeUsage {
-  /** 5-hour rolling window utilization, 0–100. */
+  /** 5-hour rolling window utilization (endpoint `pct`, verbatim). */
   usage5h?: number;
-  /** Weekly window utilization, 0–100. */
+  /** Weekly window utilization (endpoint `pct`, verbatim). */
   usageWeekly?: number;
 }
 
-interface OAuthWindow {
-  utilization?: number | null;
-  resets_at?: string | null;
+/** Thrown on 401 / expired token so callers can skip the tick, not crash. */
+export class UsageAuthError extends Error {
+  override name = 'UsageAuthError';
 }
 
-interface OAuthUsageResponse {
-  five_hour?: OAuthWindow | null;
-  seven_day?: OAuthWindow | null;
+/** Thrown on any other non-2xx (e.g. 429 rate-limit). */
+export class UsageRequestError extends Error {
+  override name = 'UsageRequestError';
+  constructor(readonly status: number) {
+    super(`usage endpoint returned ${status}`);
+  }
 }
 
-interface ClaudeAiOauth {
-  accessToken?: string;
-  refreshToken?: string;
-  expiresAt?: number;
-  scopes?: string[];
+interface CapNode {
+  utilization?: unknown;
+  resets_at?: unknown;
 }
 
-interface CredentialsFile {
-  claudeAiOauth?: ClaudeAiOauth;
+/**
+ * Parse the usage payload into 5h + weekly percentages. Caps that are `null`
+ * (not on the plan) are skipped — never rendered as 0. `utilization` is taken
+ * verbatim when finite; we never derive it from tokens.
+ */
+export function parseUsage(body: unknown): ClaudeUsage {
+  const obj = (body ?? {}) as Record<string, CapNode | null | undefined>;
+  const usage: ClaudeUsage = {};
+
+  const five = obj.five_hour;
+  if (five && typeof five.utilization === 'number' && Number.isFinite(five.utilization)) {
+    usage.usage5h = five.utilization;
+  }
+
+  const week = obj.seven_day;
+  if (week && typeof week.utilization === 'number' && Number.isFinite(week.utilization)) {
+    usage.usageWeekly = week.utilization;
+  }
+
+  return usage;
 }
+
+export interface PollOptions {
+  version?: string;
+  fetchImpl?: typeof fetch;
+}
+
+/**
+ * Read the account-wide tank. Caller must have verified `now < expiresAt` first.
+ * 401 → {@link UsageAuthError}; other non-2xx → {@link UsageRequestError}.
+ */
+export async function pollUsage(
+  accessToken: string,
+  opts: PollOptions = {},
+): Promise<ClaudeUsage> {
+  const f = opts.fetchImpl ?? fetch;
+  const res = await f(USAGE_URL, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'anthropic-beta': OAUTH_BETA,
+      'User-Agent': `claude-code/${opts.version ?? '1.0.0'}`,
+    },
+  });
+
+  if (res.status === 401) {
+    throw new UsageAuthError('usage endpoint returned 401 (token expired?)');
+  }
+  if (!res.ok) {
+    throw new UsageRequestError(res.status);
+  }
+
+  return parseUsage(await res.json());
+}
+
+// ── Daemon-facing wrapper ──────────────────────────────────────────────────
 
 interface CacheEntry {
   fetchedAt: number;
@@ -54,108 +238,54 @@ interface CacheEntry {
 /** How long a successful (or empty) fetch is reused before hitting the API again. */
 const CACHE_TTL_MS = 60_000;
 
-const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
-const OAUTH_BETA = 'oauth-2025-04-20';
-
 let cache: CacheEntry | null = null;
 
-function stripBom(s: string): string {
-  return s.charCodeAt(0) === 0xfeff ? s.slice(1) : s;
-}
-
-function parseCredentialsJson(raw: string): string | null {
-  try {
-    const parsed = JSON.parse(stripBom(raw)) as CredentialsFile;
-    const token = parsed.claudeAiOauth?.accessToken;
-    return typeof token === 'string' && token.length > 0 ? token : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Read the OAuth access token from Claude Code's on-device credentials. */
-export function readClaudeOAuthToken(): string | null {
-  const fromEnv = process.env.CLAUDE_CODE_OAUTH_TOKEN?.trim();
-  if (fromEnv) return fromEnv;
-
-  if (process.platform === 'darwin') {
-    try {
-      const raw = execFileSync(
-        'security',
-        ['find-generic-password', '-s', 'Claude Code-credentials', '-w'],
-        { encoding: 'utf8', timeout: 3_000, stdio: ['ignore', 'pipe', 'ignore'] },
-      ).trim();
-      if (raw) {
-        const token = parseCredentialsJson(raw);
-        if (token) return token;
-        // Some setups store the bare token as the password.
-        if (raw.startsWith('sk-ant-')) return raw;
-      }
-    } catch {
-      // fall through to file
-    }
-  }
-
-  try {
-    const path = join(claudeDir(), '.credentials.json');
-    const raw = readFileSync(path, 'utf8');
-    return parseCredentialsJson(raw);
-  } catch {
-    return null;
-  }
-}
-
-function clampPercent(n: number): number {
-  if (!Number.isFinite(n)) return 0;
-  return Math.max(0, Math.min(100, n));
-}
-
-function mapResponse(body: OAuthUsageResponse): ClaudeUsage {
-  const usage: ClaudeUsage = {};
-  const five = body.five_hour?.utilization;
-  const week = body.seven_day?.utilization;
-  if (typeof five === 'number') usage.usage5h = clampPercent(five);
-  if (typeof week === 'number') usage.usageWeekly = clampPercent(week);
-  return usage;
+export interface FetchClaudeUsageOptions {
+  configDir?: string;
+  now?: number;
+  fetchImpl?: typeof fetch;
+  readKeychain?: ReadCredentialsOptions['readKeychain'];
+  version?: string;
 }
 
 /**
- * Fetch 5h + weekly utilization from the Anthropic OAuth usage API.
- * Results are cached briefly so the daemon tick doesn't spam the endpoint.
+ * Fetch 5h + weekly utilization for the presence card.
+ *
+ * Flow matches ccshare's live poll: read credentials → skip if expired → poll.
+ * Never throws; missing/expired auth or network errors yield `{}` so the rest
+ * of the presence keeps working.
  */
-export async function fetchClaudeUsage(now = Date.now()): Promise<ClaudeUsage> {
+export async function fetchClaudeUsage(
+  nowOrOpts: number | FetchClaudeUsageOptions = {},
+): Promise<ClaudeUsage> {
+  const opts: FetchClaudeUsageOptions =
+    typeof nowOrOpts === 'number' ? { now: nowOrOpts } : nowOrOpts;
+  const now = opts.now ?? Date.now();
+  const configDir = opts.configDir ?? claudeDir();
+
   if (cache && now - cache.fetchedAt < CACHE_TTL_MS) {
     return cache.usage;
   }
 
-  const token = readClaudeOAuthToken();
-  if (!token) {
-    cache = { fetchedAt: now, usage: {} };
-    return {};
-  }
-
   try {
-    const res = await fetch(USAGE_URL, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'anthropic-beta': OAUTH_BETA,
-        'Content-Type': 'application/json',
-      },
-      signal: AbortSignal.timeout(8_000),
+    const creds = await readCredentials(configDir, {
+      now,
+      readKeychain: opts.readKeychain,
     });
-
-    if (!res.ok) {
+    // Never poll with a missing/expired token — Claude Code refreshes on next run.
+    if (!creds || isTokenExpired(creds, now)) {
       cache = { fetchedAt: now, usage: {} };
       return {};
     }
 
-    const body = (await res.json()) as OAuthUsageResponse;
-    const usage = mapResponse(body);
+    const usage = await pollUsage(creds.accessToken, {
+      fetchImpl: opts.fetchImpl,
+      version: opts.version,
+    });
     cache = { fetchedAt: now, usage };
     return usage;
   } catch {
-    // Keep a short negative cache so a flaky network doesn't retry every tick.
+    // Auth, network, malformed credentials — presence continues without %.
     cache = { fetchedAt: now, usage: {} };
     return {};
   }

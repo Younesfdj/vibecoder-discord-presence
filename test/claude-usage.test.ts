@@ -1,11 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { renderPresence } from '../src/core/presence';
 import { THEMES } from '../src/themes/index';
 import {
   clearClaudeUsageCache,
   fetchClaudeUsage,
-  readClaudeOAuthToken,
+  isTokenExpired,
+  parseUsage,
+  pollUsage,
+  readCredentials,
+  UsageAuthError,
+  UsageRequestError,
 } from '../src/provider/claude-usage';
 import type { AggregatedState } from '../src/types';
 
@@ -29,13 +37,33 @@ function stateWithUsage(partial: Partial<AggregatedState> = {}): AggregatedState
   };
 }
 
-test('presence formats usage5h and usageWeekly as labeled percentages', () => {
+const oauth = (accessToken: string, expiresAt: number) =>
+  JSON.stringify({
+    claudeAiOauth: {
+      accessToken,
+      expiresAt,
+      subscriptionType: 'max',
+      rateLimitTier: null,
+    },
+  });
+
+// A trimmed copy of the real /api/oauth/usage payload shape.
+const liveBody = {
+  five_hour: { utilization: 46, resets_at: '2026-06-29T21:10:00.85+00:00' },
+  seven_day: { utilization: 19, resets_at: '2026-07-05T22:00:00.85+00:00' },
+  seven_day_opus: null,
+};
+
+// ── Presence placeholders ──────────────────────────────────────────────────
+
+test('developer puts usage on its own row', () => {
   const p = renderPresence(THEMES.developer!, stateWithUsage(), NOW);
-  assert.ok(p.state?.includes('5h 54%'), `expected 5h in state, got ${p.state}`);
-  assert.ok(p.state?.includes('wk 27%'), `expected weekly in state, got ${p.state}`);
+  assert.equal(p.state, 'usage: 5h 54% · wk 27%');
+  assert.ok(p.details && !p.details.includes('usage:'), 'usage must not mix into details');
+  assert.ok(p.details?.includes('Editing index.ts'), 'activity stays on details');
 });
 
-test('presence collapses missing usage placeholders cleanly', () => {
+test('presence collapses missing usage row cleanly', () => {
   const sparse: AggregatedState = {
     sessionCount: 1,
     startedAt: NOW - 5_000,
@@ -43,59 +71,254 @@ test('presence collapses missing usage placeholders cleanly', () => {
     model: 'Sonnet 4',
   };
   const p = renderPresence(THEMES.developer!, sparse, NOW);
-  assert.ok(p.state, 'expected a state line');
-  assert.ok(!p.state!.includes('undefined'), 'should not print undefined');
-  assert.ok(!/\{\w+\}/.test(p.state!), 'unresolved placeholders');
-  assert.ok(!p.state!.includes('5h'), 'should omit 5h label when usage unknown');
-  assert.ok(!p.state!.includes('wk'), 'should omit wk label when usage unknown');
-  assert.ok(!/·\s*·/.test(p.state!), 'doubled separators');
+  // No usage → state row omitted entirely (no dangling "usage:").
+  assert.equal(p.state, undefined);
+  assert.ok(p.details, 'details still render');
+  assert.ok(!p.details!.includes('usage'), 'no usage litter in details');
 });
 
-test('chaos theme surfaces both usage windows', () => {
+test('chaos theme puts usage on its own row', () => {
   const p = renderPresence(THEMES.chaos!, stateWithUsage(), NOW);
-  assert.ok(p.state?.includes('5h 54%'), `chaos missing 5h: ${p.state}`);
-  assert.ok(p.state?.includes('wk 27%'), `chaos missing weekly: ${p.state}`);
+  assert.equal(p.state, 'usage: 5h 54% · wk 27%');
+  assert.ok(p.details && !p.details.includes('5h'), 'usage not mixed into details');
 });
 
-test('usage percentages round to whole numbers', () => {
+test('usage percentages round to whole numbers in the usage row', () => {
   const p = renderPresence(
     THEMES.developer!,
     stateWithUsage({ usage5h: 54.6, usageWeekly: 27.2 }),
     NOW,
   );
-  assert.ok(p.state?.includes('5h 55%'), `expected rounded 5h, got ${p.state}`);
-  assert.ok(p.state?.includes('wk 27%'), `expected rounded weekly, got ${p.state}`);
+  assert.equal(p.state, 'usage: 5h 55% · wk 27%');
 });
 
-test('fetchClaudeUsage returns empty object without a token and does not throw', async () => {
-  clearClaudeUsageCache();
-  const prev = process.env.CLAUDE_CODE_OAUTH_TOKEN;
-  // Force a miss even if keychain/file has credentials by using an empty env
-  // override path is first — set a deliberately invalid token and mock... 
-  // Without network isolation we only assert the function is safe with no token
-  // by temporarily unsetting env and relying on cache after a failed empty path.
-  // The function never throws.
-  delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+test('usage row works with only one window present', () => {
+  const only5h = renderPresence(THEMES.developer!, stateWithUsage({ usageWeekly: undefined }), NOW);
+  assert.equal(only5h.state, 'usage: 5h 54%');
+  const onlyWk = renderPresence(THEMES.developer!, stateWithUsage({ usage5h: undefined }), NOW);
+  assert.equal(onlyWk.state, 'usage: wk 27%');
+});
+
+// ── isTokenExpired ─────────────────────────────────────────────────────────
+
+test('isTokenExpired: false before expiry, true at/after, true when missing', () => {
+  assert.equal(isTokenExpired({ expiresAt: 2000 }, 1000), false);
+  assert.equal(isTokenExpired({ expiresAt: 1000 }, 1000), true);
+  assert.equal(isTokenExpired({ expiresAt: 500 }, 1000), true);
+  assert.equal(isTokenExpired({ expiresAt: NaN }, 1000), true);
+});
+
+// ── readCredentials ────────────────────────────────────────────────────────
+
+test('readCredentials returns null when no credentials exist', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'vdp-creds-'));
   try {
-    // May still find a real device token; either way must resolve an object.
-    const usage = await fetchClaudeUsage(NOW);
-    assert.equal(typeof usage, 'object');
-    assert.ok(usage !== null);
-    if (usage.usage5h != null) {
-      assert.ok(usage.usage5h >= 0 && usage.usage5h <= 100);
-    }
-    if (usage.usageWeekly != null) {
-      assert.ok(usage.usageWeekly >= 0 && usage.usageWeekly <= 100);
-    }
+    assert.equal(await readCredentials(dir, { readKeychain: async () => [] }), null);
   } finally {
-    if (prev === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
-    else process.env.CLAUDE_CODE_OAUTH_TOKEN = prev;
-    clearClaudeUsageCache();
+    await rm(dir, { recursive: true, force: true });
   }
 });
 
-test('readClaudeOAuthToken returns string or null (never throws)', () => {
-  const token = readClaudeOAuthToken();
-  assert.ok(token === null || typeof token === 'string');
-  if (token) assert.ok(token.length > 0);
+test('readCredentials reads claudeAiOauth from a plaintext .credentials.json', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'vdp-creds-'));
+  try {
+    await writeFile(
+      join(dir, '.credentials.json'),
+      JSON.stringify({
+        claudeAiOauth: {
+          accessToken: 'tok',
+          expiresAt: 1893456000000,
+          refreshToken: 'ref',
+          subscriptionType: 'pro',
+          rateLimitTier: null,
+        },
+      }),
+    );
+    const creds = await readCredentials(dir, { readKeychain: async () => [] });
+    assert.deepEqual(creds, {
+      accessToken: 'tok',
+      expiresAt: 1893456000000,
+      refreshToken: 'ref',
+      subscriptionType: 'pro',
+      rateLimitTier: null,
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('readCredentials uses a live keychain token even when a stale plaintext file exists', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'vdp-creds-'));
+  try {
+    const now = 10_000;
+    await writeFile(join(dir, '.credentials.json'), oauth('stale-file', 5_000));
+    const creds = await readCredentials(dir, {
+      now,
+      readKeychain: async () => [oauth('live-keychain', 20_000)],
+    });
+    assert.equal(creds?.accessToken, 'live-keychain');
+    assert.equal(isTokenExpired(creds!, now), false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('readCredentials uses a fresh file without consulting the keychain', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'vdp-creds-'));
+  try {
+    const now = 10_000;
+    let keychainReads = 0;
+    await writeFile(join(dir, '.credentials.json'), oauth('fresh-file', 20_000));
+    const creds = await readCredentials(dir, {
+      now,
+      readKeychain: async () => {
+        keychainReads++;
+        return [];
+      },
+    });
+    assert.equal(creds?.accessToken, 'fresh-file');
+    assert.equal(keychainReads, 0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('readCredentials falls back to the expired file when no fresher source exists', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'vdp-creds-'));
+  try {
+    const now = 10_000;
+    await writeFile(join(dir, '.credentials.json'), oauth('stale-file', 5_000));
+    const creds = await readCredentials(dir, { now, readKeychain: async () => [] });
+    assert.equal(creds?.accessToken, 'stale-file');
+    assert.equal(isTokenExpired(creds!, now), true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('readCredentials skips a malformed keychain entry and keeps looking', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'vdp-creds-'));
+  try {
+    const now = 10_000;
+    await writeFile(join(dir, '.credentials.json'), oauth('stale-file', 5_000));
+    const creds = await readCredentials(dir, {
+      now,
+      readKeychain: async () => ['}{ not json', oauth('live-keychain', 20_000)],
+    });
+    assert.equal(creds?.accessToken, 'live-keychain');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ── parseUsage / pollUsage ─────────────────────────────────────────────────
+
+test('parseUsage maps available caps, skips null, trusts utilization verbatim', () => {
+  const usage = parseUsage(liveBody);
+  assert.deepEqual(usage, { usage5h: 46, usageWeekly: 19 });
+});
+
+test('parseUsage skips non-finite utilization (NaN/Infinity)', () => {
+  assert.deepEqual(parseUsage({ five_hour: { utilization: NaN } }), {});
+  assert.deepEqual(parseUsage({ five_hour: { utilization: Infinity } }), {});
+  assert.deepEqual(parseUsage({ five_hour: { utilization: '46' } }), {});
+  assert.deepEqual(parseUsage({ five_hour: { utilization: 0 } }), { usage5h: 0 });
+});
+
+test('pollUsage sends oauth headers and parses the body', async () => {
+  let seen: { url: string; headers: Record<string, string> } | null = null;
+  const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+    seen = {
+      url: String(url),
+      headers: init?.headers as Record<string, string>,
+    };
+    return new Response(JSON.stringify(liveBody), { status: 200 });
+  }) as typeof fetch;
+
+  const usage = await pollUsage('tok-123', { fetchImpl, version: '9.9.9' });
+  assert.deepEqual(usage, { usage5h: 46, usageWeekly: 19 });
+  assert.equal(seen!.headers.Authorization, 'Bearer tok-123');
+  assert.equal(seen!.headers['anthropic-beta'], 'oauth-2025-04-20');
+  assert.equal(seen!.headers['User-Agent'], 'claude-code/9.9.9');
+});
+
+test('pollUsage throws UsageAuthError on 401', async () => {
+  const fetchImpl = (async () => new Response('', { status: 401 })) as typeof fetch;
+  await assert.rejects(() => pollUsage('tok', { fetchImpl }), UsageAuthError);
+});
+
+test('pollUsage throws UsageRequestError carrying the status on other failures', async () => {
+  const fetchImpl = (async () => new Response('', { status: 429 })) as typeof fetch;
+  try {
+    await pollUsage('tok', { fetchImpl });
+    assert.fail('expected throw');
+  } catch (err) {
+    assert.ok(err instanceof UsageRequestError);
+    assert.equal(err.status, 429);
+  }
+});
+
+// ── fetchClaudeUsage wrapper ───────────────────────────────────────────────
+
+test('fetchClaudeUsage skips poll when token is expired', async () => {
+  clearClaudeUsageCache();
+  const dir = await mkdtemp(join(tmpdir(), 'vdp-fetch-'));
+  let polled = false;
+  try {
+    await writeFile(join(dir, '.credentials.json'), oauth('stale', 5_000));
+    const usage = await fetchClaudeUsage({
+      configDir: dir,
+      now: 10_000,
+      readKeychain: async () => [],
+      fetchImpl: (async () => {
+        polled = true;
+        return new Response(JSON.stringify(liveBody), { status: 200 });
+      }) as typeof fetch,
+    });
+    assert.deepEqual(usage, {});
+    assert.equal(polled, false);
+  } finally {
+    clearClaudeUsageCache();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('fetchClaudeUsage polls with a live token and returns utilization', async () => {
+  clearClaudeUsageCache();
+  const dir = await mkdtemp(join(tmpdir(), 'vdp-fetch-'));
+  try {
+    await writeFile(join(dir, '.credentials.json'), oauth('live-tok', 20_000));
+    const usage = await fetchClaudeUsage({
+      configDir: dir,
+      now: 10_000,
+      readKeychain: async () => [],
+      fetchImpl: (async (_url, init) => {
+        const headers = init?.headers as Record<string, string>;
+        assert.equal(headers.Authorization, 'Bearer live-tok');
+        return new Response(JSON.stringify(liveBody), { status: 200 });
+      }) as typeof fetch,
+    });
+    assert.deepEqual(usage, { usage5h: 46, usageWeekly: 19 });
+  } finally {
+    clearClaudeUsageCache();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('fetchClaudeUsage never throws on network/auth failure', async () => {
+  clearClaudeUsageCache();
+  const dir = await mkdtemp(join(tmpdir(), 'vdp-fetch-'));
+  try {
+    await writeFile(join(dir, '.credentials.json'), oauth('live-tok', 20_000));
+    const usage = await fetchClaudeUsage({
+      configDir: dir,
+      now: 10_000,
+      readKeychain: async () => [],
+      fetchImpl: (async () => new Response('', { status: 401 })) as typeof fetch,
+    });
+    assert.deepEqual(usage, {});
+  } finally {
+    clearClaudeUsageCache();
+    await rm(dir, { recursive: true, force: true });
+  }
 });

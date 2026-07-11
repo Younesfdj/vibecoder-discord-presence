@@ -73,11 +73,16 @@ Themes live in [`src/themes/index.ts`](src/themes/index.ts).
 
    ```
    {project} {branch} {model} {activity} {file} {tokens} {cost}
-   {elapsed} {sessionCount} {state} {usage5h} {usageWeekly}
+   {elapsed} {sessionCount} {state} {usage5h} {usageWeekly} {usage}
    ```
 
+   Full catalog: [`src/core/placeholders.ts`](src/core/placeholders.ts).
+   Put `{usage}` alone on a line for a dedicated `usage: 5h … · wk …` row
+   (preferred over hardcoding the `usage:` prefix around empty tokens).
+
    Empty placeholders collapse gracefully, so a theme degrades cleanly when a
-   field isn't available yet.
+   field isn't available yet. The same placeholders work in **custom** themes
+   via `vdp config` (preview sample data includes plan usage).
 
 2. **Register the name** in the `ThemeName` union in
    [`src/types.ts`](src/types.ts) so it type-checks, and make sure it's
