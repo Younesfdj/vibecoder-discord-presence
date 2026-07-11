@@ -61,6 +61,8 @@ export function findUnknownAssetKeys(theme: Theme): string[] {
   const keys = [theme.largeImage.key, theme.smallImage.key];
   const unknown: string[] = [];
   for (const key of keys) {
+    // Empty key means "no image" — not an asset reference.
+    if (!key) continue;
     for (const resolved of expandAssetKey(key)) {
       if (!ALLOWED_ASSET_KEYS.has(resolved)) unknown.push(resolved);
     }

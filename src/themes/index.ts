@@ -6,7 +6,7 @@
  * aggregated session state:
  *
  *   {project} {branch} {model} {activity} {file} {tokens} {cost}
- *   {elapsed} {sessionCount} {state}
+ *   {elapsed} {sessionCount} {state} {usage5h} {usageWeekly}
  *
  * Empty placeholders collapse gracefully (no "Coding " with a trailing blank).
  * Privacy is simply a function of which placeholders a theme uses — the safe
@@ -38,7 +38,7 @@ export const THEMES: Record<string, Theme> = {
 
   developer: {
     details: 'Coding {project} ({branch} branch)',
-    state: '{activity} </> Using {model}',
+    state: '{activity} </> {model} · {usage5h} · {usageWeekly}',
     largeImage: { key: 'logo', text: 'Claude Code · {model}' },
     smallImage: { key: '', text: '' },
     timer: true,
@@ -69,7 +69,7 @@ export const THEMES: Record<string, Theme> = {
   chaos: {
     details: '🚀 {activity} — 📂 {project} {branch} 💻🔥',
     state:
-      'cooking with {model} · {tokens} tokens burned· {cost} · 👥 {sessionCount} · ⌛ {elapsed}',
+      'cooking with {model} · {tokens} tokens · {cost} · {usage5h} · {usageWeekly} · ⌛ {elapsed}',
     largeImage: { key: 'logo', text: '✨ locked in · {model} · no thoughts only vibes 🔥' },
     smallImage: { key: 'status-{state}', text: '{activity} fr fr 💯' },
     timer: true,
@@ -125,7 +125,7 @@ export interface ThemeManifestEntry {
 
 export const THEME_MANIFEST: readonly ThemeManifestEntry[] = [
   { name: 'minimal', description: 'privacy-safe, nothing about your work' },
-  { name: 'developer', description: 'project, branch, file, model' },
+  { name: 'developer', description: 'project, branch, model, plan usage' },
   { name: 'focus', description: 'deep-work timer' },
   { name: 'playful', description: 'vibey' },
   { name: 'chaos', description: '🚀 every stat, all the emojis, peak vibes' },

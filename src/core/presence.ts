@@ -26,6 +26,18 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
+/**
+ * Format plan utilization for presence text. Labels live in the value so empty
+ * placeholders collapse cleanly (no dangling "5h · wk" when usage is unknown).
+ */
+function formatUsage5h(n: number): string {
+  return `5h ${Math.round(n)}%`;
+}
+
+function formatUsageWeekly(n: number): string {
+  return `wk ${Math.round(n)}%`;
+}
+
 function buildValues(state: AggregatedState, now: number): Values {
   return {
     project: state.project ?? '',
@@ -39,6 +51,9 @@ function buildValues(state: AggregatedState, now: number): Values {
     sessionCount: String(state.sessionCount),
     // Drives the `status-{state}` badge; also available as a text token.
     state: state.state ?? 'idle',
+    // Claude plan quota windows (from the OAuth usage API).
+    usage5h: state.usage5h != null ? formatUsage5h(state.usage5h) : '',
+    usageWeekly: state.usageWeekly != null ? formatUsageWeekly(state.usageWeekly) : '',
   };
 }
 

@@ -93,6 +93,10 @@ export interface AggregatedState {
   file?: string;
   tokens?: number;
   cost?: number;
+  /** Claude plan 5-hour rolling window utilization (0–100). */
+  usage5h?: number;
+  /** Claude plan weekly window utilization (0–100). */
+  usageWeekly?: number;
 }
 
 /** What the Discord layer sends, mapped onto Discord's fixed slots. */

@@ -26,6 +26,7 @@ import { configPath } from '../core/paths';
 import { readUserConfig, resolveClientId, resolveTheme } from '../core/config';
 import { PRUNE_AFTER_MS, aggregate, readMarkers, removeSessionMarker } from '../core/state';
 import { readTranscriptMeta } from '../provider/transcript';
+import { fetchClaudeUsage } from '../provider/claude-usage';
 import { renderPresence } from '../core/presence';
 import { DiscordPresence } from './discord';
 
@@ -98,6 +99,10 @@ export async function startDaemon(_args: string[] = []): Promise<void> {
       state.model ??= meta.model;
       state.branch ??= meta.branch;
       state.tokens ??= meta.tokens;
+      // Plan quota % from Claude's OAuth usage API (device session token).
+      const usage = await fetchClaudeUsage(now);
+      state.usage5h = usage.usage5h;
+      state.usageWeekly = usage.usageWeekly;
       const theme = resolveTheme(readUserConfig(configPath()));
       await discord.setActivity(renderPresence(theme, state, now));
       writeDaemonStatus({

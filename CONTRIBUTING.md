@@ -73,7 +73,7 @@ Themes live in [`src/themes/index.ts`](src/themes/index.ts).
 
    ```
    {project} {branch} {model} {activity} {file} {tokens} {cost}
-   {elapsed} {sessionCount} {state}
+   {elapsed} {sessionCount} {state} {usage5h} {usageWeekly}
    ```
 
    Empty placeholders collapse gracefully, so a theme degrades cleanly when a

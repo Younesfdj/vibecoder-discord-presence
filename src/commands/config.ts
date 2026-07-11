@@ -37,6 +37,8 @@ function sampleState(now: number): AggregatedState {
     file: 'index.ts',
     tokens: 12_345,
     cost: 0.42,
+    usage5h: 54,
+    usageWeekly: 27,
   };
 }
 
