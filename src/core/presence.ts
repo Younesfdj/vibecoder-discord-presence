@@ -61,28 +61,41 @@ function interpolate(template: string, values: Values): string {
   return tidy(template.replace(/\{(\w+)\}/g, (_, key: string) => values[key] ?? ''));
 }
 
+/**
+ * Discord rejects any Rich Presence field that exceeds 128 characters.
+ * When that happens the RPC library throws synchronously, and the caller's
+ * bare try/catch in discord.ts treats every throw as a dead socket — forcing
+ * a reconnect on the next tick, which fails the same way, forever.
+ *
+ * Truncating here, before the payload leaves this module, keeps the fields
+ * within spec and stops that loop from ever starting.
+ */
+function truncate(s: string, limit = 128): string {
+  return s.length > limit ? `${s.slice(0, limit - 1)}…` : s;
+}
+
 export function renderPresence(theme: Theme, state: AggregatedState, now: number): PresencePayload {
   const values = buildValues(state, now);
   const payload: PresencePayload = {};
 
   const details = interpolate(theme.details, values);
-  if (details) payload.details = details;
+  if (details) payload.details = truncate(details);
 
   const stateLine = interpolate(theme.state, values);
-  if (stateLine) payload.state = stateLine;
+  if (stateLine) payload.state = truncate(stateLine);
 
   const largeKey = interpolate(theme.largeImage.key, values);
   if (largeKey) {
     payload.largeImageKey = largeKey;
     const largeText = interpolate(theme.largeImage.text, values);
-    if (largeText) payload.largeImageText = largeText;
+    if (largeText) payload.largeImageText = truncate(largeText);
   }
 
   const smallKey = interpolate(theme.smallImage.key, values);
   if (smallKey) {
     payload.smallImageKey = smallKey;
     const smallText = interpolate(theme.smallImage.text, values);
-    if (smallText) payload.smallImageText = smallText;
+    if (smallText) payload.smallImageText = truncate(smallText);
   }
 
   if (theme.timer) payload.startTimestamp = state.startedAt;

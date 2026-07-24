@@ -132,3 +132,31 @@ test('renderPresence resolves status-{state} badge to a concrete key', () => {
   const p = renderPresence(THEMES.terminal!, { ...richState(), state: 'thinking' }, NOW);
   assert.equal(p.smallImageKey, 'status-thinking');
 });
+
+test('truncation: details and state are capped at 128 chars with an ellipsis', () => {
+  // Simulate a deeply nested file path that inflates the rendered line past 128 chars.
+  const longFile = 'a'.repeat(60) + '/' + 'b'.repeat(60) + '.ts';
+  const s: AggregatedState = { ...richState(), file: longFile, project: 'x'.repeat(50) };
+  for (const name of NEW_THEMES) {
+    const p = renderPresence(THEMES[name]!, s, NOW);
+    if (p.details) {
+      assert.ok(p.details.length <= 128, `${name}: details exceeded 128 chars`);
+      if (p.details.length === 128) {
+        assert.ok(p.details.endsWith('…'), `${name}: truncated details must end with ellipsis`);
+      }
+    }
+    if (p.state) {
+      assert.ok(p.state.length <= 128, `${name}: state exceeded 128 chars`);
+      if (p.state.length === 128) {
+        assert.ok(p.state.endsWith('…'), `${name}: truncated state must end with ellipsis`);
+      }
+    }
+  }
+});
+
+test('truncation: short strings are returned unchanged', () => {
+  const p = renderPresence(THEMES.terminal!, richState(), NOW);
+  // richState uses short values; nothing should be truncated.
+  if (p.details) assert.ok(!p.details.endsWith('…'), 'short details got truncated unexpectedly');
+  if (p.state) assert.ok(!p.state.endsWith('…'), 'short state got truncated unexpectedly');
+});
